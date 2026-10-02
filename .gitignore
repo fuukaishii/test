@@ -5,3 +5,5 @@ service_account.json
 .env
 __pycache__/
 .venv/
+oauth_client.json
+client_secret*.json

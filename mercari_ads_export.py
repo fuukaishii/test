@@ -26,6 +26,10 @@ CAMPAIGNS_URL = (
 )
 SPREADSHEET_ID = "1Y-H26QoUVAvRWYNfB8UUcfWSCmVIuu8sKbzn2Sasz90"
 SHEET_TAB = os.getenv("SHEET_TAB", "貼り付け用")  # タブ名(変更不可とのことなので固定)
+# Google認証: OAuth(自分のGoogleアカウント)を標準とし、service_account.json があればそちらを優先
+OAUTH_CLIENT_FILE = Path(os.getenv("OAUTH_CLIENT_FILE", BASE / "oauth_client.json"))  # OAuthクライアントID(デスクトップ)のJSON
+OAUTH_TOKEN_FILE = BASE / "auth" / "google_token.json"  # 初回ログインで自動作成(refresh token入り)
+SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SERVICE_ACCOUNT_FILE = Path(os.getenv("SERVICE_ACCOUNT_FILE", BASE / "service_account.json"))
 STATE_FILE = BASE / "auth" / "state.json"  # ログインセッション(storage_state)
 DOWNLOAD_DIR = BASE / "downloads"
@@ -333,10 +337,43 @@ def merge_current_month(
 
 
 # ============================ 5. Google Sheets ============================
+def google_login() -> None:
+    """初回のみ: ブラウザで自分のGoogleアカウントにログインして許可し、トークンを保存"""
+    import gspread
+
+    if not OAUTH_CLIENT_FILE.exists():
+        raise SystemExit(f"OAuthクライアントのJSONがありません: {OAUTH_CLIENT_FILE} (README参照)")
+    OAUTH_TOKEN_FILE.parent.mkdir(exist_ok=True)
+    OAUTH_TOKEN_FILE.unlink(missing_ok=True)  # 再ログイン時は作り直す
+    gspread.oauth(
+        scopes=SHEETS_SCOPES,
+        credentials_filename=str(OAUTH_CLIENT_FILE),
+        authorized_user_filename=str(OAUTH_TOKEN_FILE),
+    )
+    OAUTH_TOKEN_FILE.chmod(0o600)
+    log.info("Google認証を保存: %s", OAUTH_TOKEN_FILE)
+
+
+def has_google_auth() -> bool:
+    return SERVICE_ACCOUNT_FILE.exists() or OAUTH_TOKEN_FILE.exists()
+
+
+def get_gspread_client():
+    import gspread
+
+    if SERVICE_ACCOUNT_FILE.exists():
+        return gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    return gspread.oauth(
+        scopes=SHEETS_SCOPES,
+        credentials_filename=str(OAUTH_CLIENT_FILE),
+        authorized_user_filename=str(OAUTH_TOKEN_FILE),
+    )
+
+
 def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date) -> None:
     import gspread
 
-    gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    gc = get_gspread_client()
     ws = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_TAB)
     values = ws.get_all_values()  # 表示値(文字列)で取得 -> parse_dateで統一
     sheet_header = values[0] if values else []
@@ -356,6 +393,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--login", action="store_true", help="手動ログインしてセッション保存")
     ap.add_argument("--inspect", action="store_true", help="画面要素を保存(セレクタ調整用)")
+    ap.add_argument("--google-login", action="store_true", help="Googleアカウントで認証(初回のみ)")
     ap.add_argument("--headed", action="store_true", help="ブラウザを表示して実行")
     ap.add_argument("--csv", type=Path, help="DLせずこのCSVを使う")
     ap.add_argument("--dry-run", action="store_true", help="シートへ書き込まない")
@@ -366,11 +404,14 @@ def main() -> int:
     if args.login:
         save_login_session()
         return 0
+    if args.google_login:
+        google_login()
+        return 0
     if args.inspect:
         inspect_page()
         return 0
-    if not args.dry_run and not SERVICE_ACCOUNT_FILE.exists():
-        log.error("サービスアカウントのJSONキーがありません: %s (README のセットアップ手順2を参照)", SERVICE_ACCOUNT_FILE)
+    if not args.dry_run and not has_google_auth():
+        log.error("Google認証がありません。`python mercari_ads_export.py --google-login` を先に実行してください")
         return 3
     try:
         path = args.csv or download_csv(headless=not args.headed)
@@ -389,7 +430,15 @@ def main() -> int:
         h, m = merge_current_month(header, [], header, body, today)
         log.info("dry-run: %d 行 / 先頭: %s", len(m), m[:2])
         return 0
-    write_to_sheet(header, body, today)
+    try:
+        write_to_sheet(header, body, today)
+    except Exception as e:
+        from google.auth.exceptions import RefreshError
+
+        if isinstance(e, RefreshError):
+            log.error("Google認証の期限切れ/失効: %s -> `--google-login` で再認証してください", e)
+            return 4
+        raise
     return 0
 
 
