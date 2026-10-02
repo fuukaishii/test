@@ -16,6 +16,7 @@ import re
 import sys
 import time
 from datetime import date, datetime
+from urllib.parse import urljoin
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,7 @@ TZ = ZoneInfo("Asia/Tokyo")
 DATE_COLUMN = os.getenv("DATE_COLUMN", "集計日")  # CSV/シートの日付列見出し。無ければ自動検出
 ARCHIVE_WORD = "アーカイブ"
 STATUS_COLUMN = os.getenv("STATUS_COLUMN", "")  # 有効/無効の列見出し。空なら自動検出
+CAMPAIGN_ID_COLUMN = os.getenv("CAMPAIGN_ID_COLUMN", "キャンペーンID")  # キャンペーン一覧CSVのID列見出し
 STATUS_ACTIVE = "有効"  # この値の行だけを配信中として残す
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
@@ -140,30 +142,59 @@ def set_period_this_month(page, today: date) -> None:
     page.get_by_role("button", name=want).wait_for(timeout=10_000)  # 反映されたか確認
 
 
-def create_and_fetch_file(page, dest: Path) -> None:
-    """DLダイアログで日別を選んでファイル作成 -> ダウンロードファイル一覧から取得"""
+def create_and_fetch_file(page, list_page, dest: Path, check=None) -> None:
+    """DLダイアログで日別を選んでファイル作成 -> ダウンロードファイル一覧(別タブ)から取得。
+
+    一覧には過去に作ったファイルも並ぶため、(1)作成前と画面が変わるまで待つ (2)check(dest)で中身を検証し、
+    違えば再取得、として古いファイルを掴まないようにする。
+    """
+    list_page.reload(wait_until="networkidle")
+    before = list_page.inner_text("body")
     page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
     page.get_by_text(UI_DAILY_LABEL, exact=True).click()
     page.get_by_role("button", name=UI_CREATE).click()
     page.get_by_role("button", name=UI_CREATE).wait_for(state="hidden", timeout=30_000)
 
-    page.get_by_role("link", name=UI_FILELIST).first.click()
-    page.wait_for_load_state("networkidle")
-    log.info("一覧ページ: %s", dump_page(page, "filelist"))
     deadline = time.time() + FILE_WAIT_SEC
     while time.time() < deadline:
-        btn = page.get_by_role("button", name=re.compile(UI_FILE_DL))
+        time.sleep(8)  # 生成待ち
+        list_page.reload(wait_until="networkidle")
+        if list_page.inner_text("body") == before:
+            continue
+        btn = list_page.get_by_role("button", name=re.compile(UI_FILE_DL))
         if btn.count():
-            with page.expect_download(timeout=30_000) as dl:
+            with list_page.expect_download(timeout=30_000) as dl:
                 btn.first.click()
             dl.value.save_as(dest)
-            return
-        time.sleep(10)  # 生成待ち
-        page.reload(wait_until="networkidle")
-    raise TimeoutError(f"{FILE_WAIT_SEC}秒待ってもダウンロード対象が見つかりません")
+            if check is None or check(dest):
+                return
+            log.info("取得ファイルの中身が期待と違うため、生成完了を待って再取得します")
+    raise TimeoutError(f"{FILE_WAIT_SEC}秒待っても期待するダウンロードファイルが見つかりません")
 
 
-def download_csv(headless: bool) -> Path:
+def active_campaign_ids(path: Path) -> list[str]:
+    """キャンペーン一覧CSVから、アーカイブ除外・有効のキャンペーンIDを重複なしで返す"""
+    rows = read_csv(path)
+    header = rows[0]
+    body = keep_active_rows(header, drop_archive_rows(header, rows[1:]))
+    if CAMPAIGN_ID_COLUMN not in header:
+        raise ValueError(f"キャンペーンID列が見つかりません。CAMPAIGN_ID_COLUMN を指定してください: {header}")
+    col = header.index(CAMPAIGN_ID_COLUMN)
+    ids = list(dict.fromkeys(r[col].strip() for r in body if col < len(r) and r[col].strip()))
+    if not ids:
+        raise ValueError("配信中(有効)のキャンペーンがありません。既存データを消さないため中断します")
+    log.info("配信中キャンペーン: %d 件 %s", len(ids), ids)
+    return ids
+
+
+def file_matches_campaign(path: Path, campaign_id: str) -> bool:
+    """広告グループ単位CSVの全行が、指定キャンペーンIDの行か(0行なら検証不能なので許容)"""
+    rows = read_csv(path)
+    return all(campaign_id in [c.strip() for c in r] for r in rows[1:])
+
+
+def download_all(headless: bool) -> list[Path]:
+    """キャンペーン一覧CSVで配信中キャンペーンを特定し、各キャンペーンの広告グループ単位(日別)CSVを取得して返す"""
     from playwright.sync_api import TimeoutError as PWTimeout
     from playwright.sync_api import sync_playwright
 
@@ -171,7 +202,8 @@ def download_csv(headless: bool) -> Path:
         raise SessionExpired("auth/state.json がありません。--login を先に実行してください")
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     today = datetime.now(TZ).date()
-    dest = DOWNLOAD_DIR / f"campaigns_daily_{today:%Y%m}.csv"
+    camp_dest = DOWNLOAD_DIR / f"campaigns_daily_{today:%Y%m}.csv"
+    paths: list[Path] = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -181,21 +213,52 @@ def download_csv(headless: bool) -> Path:
             page.goto(CAMPAIGNS_URL, wait_until="networkidle")
             if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
                 raise SessionExpired(f"セッション切れ: {page.url}")
+            list_page = ctx.new_page()  # ダウンロードファイル一覧用の別タブ
+            href = page.get_by_role("link", name=UI_FILELIST).first.get_attribute("href")
+            list_page.goto(urljoin(page.url, href), wait_until="networkidle")
 
+            # 1) キャンペーン一覧(日別)で配信中(有効)キャンペーンを特定
             set_period_this_month(page, today)
             page.wait_for_load_state("networkidle")
-            create_and_fetch_file(page, dest)
-            # セッション更新(有効期限延長)を反映
-            ctx.storage_state(path=str(STATE_FILE))
+            create_and_fetch_file(page, list_page, camp_dest)
+            ids = active_campaign_ids(camp_dest)
+
+            # 2) 各キャンペーンの広告グループ単位(日別)を取得。1件でも失敗したら全体を中断(部分データで当月を上書きしない)
+            for cid in ids:
+                dest = DOWNLOAD_DIR / f"adgroups_{cid}_{today:%Y%m}.csv"
+                page.goto(f"{CAMPAIGNS_URL}/{cid}/ad-groups", wait_until="networkidle")
+                set_period_this_month(page, today)
+                page.wait_for_load_state("networkidle")
+                create_and_fetch_file(page, list_page, dest, check=lambda d, c=cid: file_matches_campaign(d, c))
+                log.info("広告グループCSV保存: %s", dest)
+                paths.append(dest)
+            ctx.storage_state(path=str(STATE_FILE))  # セッション更新(有効期限延長)を反映
         except (PWTimeout, Exception) as e:
-            if isinstance(e, SessionExpired):
+            if isinstance(e, (SessionExpired, ValueError)):
                 raise
             shot = dump_page(page, "error")
             raise RuntimeError(f"画面操作に失敗。画面要素一覧(.txt/.png/.html): {shot} / セレクタ文言(UI_*)を調整してください: {e}") from e
         finally:
             browser.close()
-    log.info("CSV保存: %s", dest)
-    return dest
+    return paths
+
+
+def load_adgroup_rows(paths: list[Path]) -> tuple[list[str], list[list[str]]]:
+    """広告グループ単位CSVを結合(アーカイブ行は削除)。見出しは全ファイル同一であること"""
+    header: list[str] = []
+    body: list[list[str]] = []
+    for path in paths:
+        rows = read_csv(path)
+        if not rows:
+            continue
+        if not header:
+            header = rows[0]
+        elif rows[0] != header:
+            raise ValueError(f"CSVの見出しが他と違います: {path}")
+        body += drop_archive_rows(header, rows[1:])
+    if not header:
+        raise ValueError("広告グループ単位のCSVが取得できませんでした")
+    return header, body
 
 
 # ============================ 2. CSV読込・アーカイブ行削除 ============================
@@ -430,17 +493,12 @@ def main() -> int:
         log.error("Google認証がありません。`python mercari_ads_export.py --google-login` を先に実行してください")
         return 3
     try:
-        path = args.csv or download_csv(headless=not args.headed)
+        # --csv 指定時は「広告グループ単位の日別CSV」をそのまま使う
+        paths = [args.csv] if args.csv else download_all(headless=not args.headed)
+        header, body = load_adgroup_rows(paths)
     except SessionExpired as e:
         log.error("%s -> `python mercari_ads_export.py --login` で再ログインしてください", e)
         return 2
-
-    rows = read_csv(path)
-    if len(rows) < 2:
-        log.error("CSVにデータ行がありません")
-        return 1
-    header = rows[0]
-    body = keep_active_rows(header, drop_archive_rows(header, rows[1:]))
     today = datetime.now(TZ).date()
     if args.dry_run:
         h, m = merge_current_month(header, [], header, body, today)

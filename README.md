@@ -16,7 +16,7 @@ playwright install chromium
 3. 初回ログイン(手動・2FA可): `python mercari_ads_export.py --login`
    (GUIが無いサーバーでは手元PCで実行して `auth/state.json` をサーバーへコピー)
 4. (画面文言の調整が必要なとき) `python mercari_ads_export.py --inspect` → logs/ の inspect_*.txt/.png を確認
-5. 動作確認: `python mercari_ads_export.py --headed --dry-run` → 問題なければ `python mercari_ads_export.py`
+5. 動作確認: `python mercari_ads_export.py --headed --dry-run`(キャンペーン数+1個のダウンロードファイルが作られ、数分かかる) → 問題なければ `python mercari_ads_export.py`
 
 ## cron (毎日 8:10 JST)
 `crontab -e`
@@ -31,6 +31,7 @@ CRON_TZ=Asia/Tokyo
 
 ## 仕様メモ
 - アーカイブ行: いずれかのセルが「アーカイブ」と完全一致する行を削除
+- 取得単位: シートが広告グループ単位のため、キャンペーン一覧CSVで配信中(有効)キャンペーンを特定 → 各キャンペーンの広告グループ画面から日別CSVを取得して結合(広告グループ自体の有効/無効は問わず、アーカイブ行のみ削除)。1件でも失敗したら書き込まず中断
 - 配信中の判定: CSVの有効/無効列(自動検出、`STATUS_COLUMN` で指定可)が「有効」の行だけ残す。画面側の絞り込みはしない
 - 日付: `2026/10/1`・`2026-10-01`・`2026年10月1日` 等を `YYYY/MM/DD` に統一して比較
 - 書き込み: シートの当月行を破棄 → 今回の当月行で置換 → 過去月は保持し日付昇順。当月データ0件なら中断(既存を消さない)
