@@ -188,8 +188,13 @@ def active_campaign_ids(path: Path) -> list[str]:
 
 
 def file_matches_campaign(path: Path, campaign_id: str) -> bool:
-    """広告グループ単位CSVの全行が、指定キャンペーンIDの行か(0行なら検証不能なので許容)"""
+    """広告グループ単位CSVか(見出しに「広告グループ」を含む)、かつ全行が指定キャンペーンIDの行か。
+
+    直前に作ったキャンペーン単位のファイルを掴んだ場合は、見出しで弾いて再取得させる。
+    """
     rows = read_csv(path)
+    if not rows or not any("広告グループ" in h for h in rows[0]):
+        return False
     return all(campaign_id in [c.strip() for c in r] for r in rows[1:])
 
 
