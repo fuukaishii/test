@@ -369,6 +369,9 @@ def main() -> int:
     if args.inspect:
         inspect_page()
         return 0
+    if not args.dry_run and not SERVICE_ACCOUNT_FILE.exists():
+        log.error("サービスアカウントのJSONキーがありません: %s (README のセットアップ手順2を参照)", SERVICE_ACCOUNT_FILE)
+        return 3
     try:
         path = args.csv or download_csv(headless=not args.headed)
     except SessionExpired as e:

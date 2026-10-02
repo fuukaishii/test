@@ -21,6 +21,7 @@ CRON_TZ=Asia/Tokyo
 ```
 - `flock` で二重起動防止、ログは `logs/cron.log`
 - 終了コード 2 = ログインセッション切れ → `--login` で再取得
+- 終了コード 3 = service_account.json が無い
 - 失敗通知が必要なら末尾に `|| curl -X POST <Slack Webhook> -d '{"text":"mercari export failed"}'` 等を追加
 
 ## 仕様メモ
