@@ -10,11 +10,13 @@
 import argparse
 import csv
 import io
+import json
 import logging
 import os
 import re
 import sys
 import time
+import urllib.request
 from datetime import date, datetime
 from urllib.parse import urljoin
 from pathlib import Path
@@ -472,6 +474,41 @@ def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date
     log.info("シート更新: %d 行(ヘッダ除く)", len(merged))
 
 
+# ============================ 失敗通知 ============================
+NOTIFY_WEBHOOK_FILE = BASE / "notify_webhook.txt"  # Slack/Teams等のIncoming Webhook URL(1行)。gitignore済み
+FAILURE_MESSAGES = {
+    1: ("実行に失敗しました", "logs\\task.log を確認してください"),
+    2: ("メルカリのログインが切れました", "python mercari_ads_export.py --login で再ログインしてください"),
+    3: ("Google認証が未実施です", "python mercari_ads_export.py --google-login を実行してください"),
+    4: ("Google認証が失効しました", "python mercari_ads_export.py --google-login で再認証してください"),
+}
+
+
+def notify(title: str, msg: str) -> None:
+    """Webhook(設定時)とWindowsのポップアップで通知。通知自体の失敗は握りつぶす"""
+    url = os.getenv("NOTIFY_WEBHOOK_URL", "").strip()
+    if not url and NOTIFY_WEBHOOK_FILE.exists():
+        url = NOTIFY_WEBHOOK_FILE.read_text(encoding="utf-8").strip()
+    if url:
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"text": f"【メルカリ広告→スプシ】{title}\n{msg}"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=15).read()
+        except Exception as e:  # noqa: BLE001
+            log.error("Webhook通知に失敗: %s", e)
+    if sys.platform == "win32":
+        import subprocess
+
+        code = "import ctypes,sys;ctypes.windll.user32.MessageBoxW(0,sys.argv[2],sys.argv[1],0x40|0x40000)"
+        subprocess.Popen(  # 閉じられるまで残るポップアップ。本処理は待たない
+            [sys.executable, "-c", code, f"メルカリ広告→スプシ: {title}", msg],
+            creationflags=0x00000008,  # DETACHED_PROCESS
+        )
+
+
 # ============================ main ============================
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -522,4 +559,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+        if not isinstance(e.code, int) and e.code:
+            log.error("%s", e.code)
+    except Exception:  # noqa: BLE001
+        log.exception("予期しないエラー")
+        rc = 1
+    if rc and os.getenv("MERCARI_NOTIFY"):  # 定期実行(run_daily.bat)のときだけ通知
+        notify(*FAILURE_MESSAGES.get(rc, FAILURE_MESSAGES[1]))
+    sys.exit(rc)

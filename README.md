@@ -18,7 +18,7 @@ playwright install chromium
 4. (画面文言の調整が必要なとき) `python mercari_ads_export.py --inspect` → logs/ の inspect_*.txt/.png を確認
 5. 動作確認: `python mercari_ads_export.py --headed --dry-run`(キャンペーン数+1個のダウンロードファイルが作られ、数分かかる) → 問題なければ `python mercari_ads_export.py`
 
-## cron (毎日 8:10 JST)
+## cron (毎日 9:30 JST)
 `crontab -e`
 ```cron
 CRON_TZ=Asia/Tokyo
@@ -32,11 +32,16 @@ CRON_TZ=Asia/Tokyo
 ## Windows(タスクスケジューラ)で毎日実行
 `run_daily.bat` を使う。コマンドプロンプトで(本フォルダで):
 ```
-schtasks /create /tn "MercariAdsExport" /tr "\"%CD%\run_daily.bat\"" /sc daily /st 08:10
+schtasks /create /tn "MercariAdsExport" /tr "\"%CD%\run_daily.bat\"" /sc daily /st 09:30
 ```
 - 実行ログは `logs\task.log`(末尾の `exit code: 0` が成功。2=メルカリ再ログイン、3/4=Google再認証)
 - 試運転: `schtasks /run /tn "MercariAdsExport"`、削除: `schtasks /delete /tn "MercariAdsExport" /f`
 - PCの電源が入りログオン中であること。取り逃し対策はタスクスケジューラGUIの「設定」で「スケジュールされた時刻にタスクを開始できなかった場合、すぐにタスクを実行する」をON
+
+## 失敗通知(定期実行時のみ)
+`run_daily.bat` 経由で失敗(終了コード≠0)したとき、Windowsのポップアップ(閉じるまで残る)で通知する。
+Slack/Teams等のIncoming Webhook URLを `notify_webhook.txt`(1行・gitignore済み)に書くと、そちらにも通知する。
+- 2=メルカリ再ログイン要、3=Google未認証、4=Google認証失効、1=その他の失敗
 
 ## 仕様メモ
 - アーカイブ行: いずれかのセルが「アーカイブ」と完全一致する行を削除
