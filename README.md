@@ -10,7 +10,8 @@ playwright install chromium
 2. 対象スプシを **サービスアカウントのメールアドレスに「編集者」で共有**
 3. 初回ログイン(手動・2FA可): `python mercari_ads_export.py --login`
    (GUIが無いサーバーでは手元PCで実行して `auth/state.json` をサーバーへコピー)
-4. 動作確認: `python mercari_ads_export.py --headed --dry-run` → 問題なければ `python mercari_ads_export.py`
+4. (画面文言の調整が必要なとき) `python mercari_ads_export.py --inspect` → logs/ の inspect_*.txt/.png を確認
+5. 動作確認: `python mercari_ads_export.py --headed --dry-run` → 問題なければ `python mercari_ads_export.py`
 
 ## cron (毎日 8:10 JST)
 `crontab -e`

@@ -64,6 +64,38 @@ def save_login_session() -> None:
     log.info("セッション保存: %s", STATE_FILE)
 
 
+def dump_page(page, tag: str) -> Path:
+    """画面調整用: スクショ・HTML・クリック可能要素の文言を logs/ に保存"""
+    stem = BASE / "logs" / f"{tag}_{datetime.now(TZ):%Y%m%d_%H%M%S}"
+    stem.parent.mkdir(exist_ok=True)
+    page.screenshot(path=f"{stem}.png", full_page=True)
+    Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
+    items = page.evaluate(
+        """() => [...document.querySelectorAll(
+            'button,[role=button],[role=tab],[role=option],[role=menuitem],[role=combobox],a,label,input,select')]
+          .filter(e => e.offsetParent !== null)
+          .map(e => [e.tagName, e.getAttribute('role') || '', (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().slice(0, 60)])
+          .map(x => x.join(' | '))"""
+    )
+    Path(f"{stem}.txt").write_text(f"URL: {page.url}\n" + "\n".join(items), encoding="utf-8")
+    return Path(f"{stem}.txt")
+
+
+def inspect_page() -> None:
+    """保存済みセッションで開き、手動操作した前後の画面要素を保存する(セレクタ調整用)"""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        ctx = browser.new_context(storage_state=str(STATE_FILE), locale="ja-JP")
+        page = ctx.new_page()
+        page.goto(CAMPAIGNS_URL, wait_until="networkidle")
+        log.info("初期画面: %s", dump_page(page, "inspect_initial"))
+        input("ブラウザで 配信中絞り込み→当月→日別→DLボタンが見える状態まで操作し、Enter > ")
+        log.info("操作後: %s", dump_page(page, "inspect_after"))
+        browser.close()
+
+
 def download_csv(headless: bool) -> Path:
     from playwright.sync_api import TimeoutError as PWTimeout
     from playwright.sync_api import sync_playwright
@@ -100,10 +132,8 @@ def download_csv(headless: bool) -> Path:
         except (PWTimeout, Exception) as e:
             if isinstance(e, SessionExpired):
                 raise
-            shot = BASE / "logs" / f"error_{datetime.now(TZ):%Y%m%d_%H%M%S}.png"
-            shot.parent.mkdir(exist_ok=True)
-            page.screenshot(path=str(shot), full_page=True)
-            raise RuntimeError(f"画面操作に失敗。スクショ: {shot} / セレクタ文言(UI_*)を調整してください: {e}") from e
+            shot = dump_page(page, "error")
+            raise RuntimeError(f"画面操作に失敗。画面要素一覧(.txt/.png/.html): {shot} / セレクタ文言(UI_*)を調整してください: {e}") from e
         finally:
             browser.close()
     log.info("CSV保存: %s", dest)
@@ -250,6 +280,7 @@ def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--login", action="store_true", help="手動ログインしてセッション保存")
+    ap.add_argument("--inspect", action="store_true", help="画面要素を保存(セレクタ調整用)")
     ap.add_argument("--headed", action="store_true", help="ブラウザを表示して実行")
     ap.add_argument("--csv", type=Path, help="DLせずこのCSVを使う")
     ap.add_argument("--dry-run", action="store_true", help="シートへ書き込まない")
@@ -259,6 +290,9 @@ def main() -> int:
 
     if args.login:
         save_login_session()
+        return 0
+    if args.inspect:
+        inspect_page()
         return 0
     try:
         path = args.csv or download_csv(headless=not args.headed)
