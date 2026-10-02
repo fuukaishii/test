@@ -370,11 +370,27 @@ def get_gspread_client():
     )
 
 
+def open_worksheet(sh):
+    """タブ名で取得。全角半角・空白の違いは吸収し、見つからなければ実在するタブ名を表示して止まる。"""
+    import unicodedata
+
+    norm = lambda t: unicodedata.normalize("NFKC", t).replace(" ", "").replace("\u3000", "")
+    tabs = sh.worksheets()
+    hit = [w for w in tabs if norm(w.title) == norm(SHEET_TAB)]
+    if len(hit) == 1:
+        return hit[0]
+    names = [w.title for w in tabs]
+    raise SystemExit(
+        f"タブ {SHEET_TAB!r} が見つかりません。スプシ内のタブ: {names}\n"
+        "正しいタブ名を環境変数 SHEET_TAB で指定してください (例: set SHEET_TAB=タブ名)"
+    )
+
+
 def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date) -> None:
     import gspread
 
     gc = get_gspread_client()
-    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_TAB)
+    ws = open_worksheet(gc.open_by_key(SPREADSHEET_ID))
     values = ws.get_all_values()  # 表示値(文字列)で取得 -> parse_dateで統一
     sheet_header = values[0] if values else []
     sheet_rows = [r for r in values[1:] if any(c.strip() for c in r)]
