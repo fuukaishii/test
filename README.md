@@ -29,6 +29,15 @@ CRON_TZ=Asia/Tokyo
 - 終了コード 3 = Google認証が未実施(`--google-login`)、4 = Google認証の失効(再度 `--google-login`)
 - 失敗通知が必要なら末尾に `|| curl -X POST <Slack Webhook> -d '{"text":"mercari export failed"}'` 等を追加
 
+## Windows(タスクスケジューラ)で毎日実行
+`run_daily.bat` を使う。コマンドプロンプトで(本フォルダで):
+```
+schtasks /create /tn "MercariAdsExport" /tr "\"%CD%\run_daily.bat\"" /sc daily /st 08:10
+```
+- 実行ログは `logs\task.log`(末尾の `exit code: 0` が成功。2=メルカリ再ログイン、3/4=Google再認証)
+- 試運転: `schtasks /run /tn "MercariAdsExport"`、削除: `schtasks /delete /tn "MercariAdsExport" /f`
+- PCの電源が入りログオン中であること。取り逃し対策はタスクスケジューラGUIの「設定」で「スケジュールされた時刻にタスクを開始できなかった場合、すぐにタスクを実行する」をON
+
 ## 仕様メモ
 - アーカイブ行: いずれかのセルが「アーカイブ」と完全一致する行を削除
 - 取得単位: シートが広告グループ単位のため、キャンペーン一覧CSVで配信中(有効)キャンペーンを特定 → 各キャンペーンの広告グループ画面から日別CSVを取得して結合(広告グループ自体の有効/無効は問わず、アーカイブ行のみ削除)。1件でも失敗したら書き込まず中断
