@@ -36,10 +36,10 @@ STATUS_COLUMN = os.getenv("STATUS_COLUMN", "")  # 有効/無効の列見出し�
 STATUS_ACTIVE = "有効"  # この値の行だけを配信中として残す
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
-UI_PERIOD_BUTTON = r"期間|日付"      # 期間ピッカーを開くボタン
+UI_PERIOD_BUTTON = r"\d{4}/\d{2}/\d{2}\s*-\s*\d{4}/\d{2}/\d{2}"  # 期間ボタン(表示が「2026/09/26 - 2026/10/02」)
 UI_PERIOD_THIS_MONTH = r"今月|当月"  # 期間プリセット
-UI_DAILY = r"日別"                   # 日別(日次)表示の切替
-UI_DOWNLOAD = r"CSV|ダウンロード"    # DLボタン
+UI_DAILY = r"日別|日次"               # 日別(日次)表示の切替(画面に無ければ無視)
+UI_DOWNLOAD = r"^ダウンロード$"        # 一覧右上のDLボタン
 
 log = logging.getLogger("mercari")
 
@@ -83,17 +83,27 @@ def dump_page(page, tag: str) -> Path:
 
 
 def inspect_page() -> None:
-    """保存済みセッションで開き、手動操作した前後の画面要素を保存する(セレクタ調整用)"""
+    """保存済みセッションで開き、手動操作しながら任意の場面で画面要素を保存する(セレクタ調整用)"""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        ctx = browser.new_context(storage_state=str(STATE_FILE), locale="ja-JP")
+        ctx = browser.new_context(storage_state=str(STATE_FILE), accept_downloads=True, locale="ja-JP")
         page = ctx.new_page()
+        page.on("download", lambda d: print(f"  [ダウンロード発生] {d.suggested_filename}"))
         page.goto(CAMPAIGNS_URL, wait_until="networkidle")
-        log.info("初期画面: %s", dump_page(page, "inspect_initial"))
-        input("ブラウザで 当月→日別→DLボタンが見える状態まで操作し、Enter > ")
-        log.info("操作後: %s", dump_page(page, "inspect_after"))
+        n = 0
+        while True:
+            n += 1
+            path = dump_page(page, f"inspect{n:02d}")
+            print(f"\n=== 保存({n}): {path} ===")
+            print(path.read_text(encoding="utf-8"))
+            ans = input(
+                "\nブラウザで次の操作(期間ボタン→今月/当月を選ぶ→日別があれば→ダウンロード等)を1つ行い、"
+                "Enterで再保存 / 終了は q + Enter > "
+            )
+            if ans.strip().lower() == "q":
+                break
         browser.close()
 
 
@@ -116,14 +126,17 @@ def download_csv(headless: bool) -> Path:
             if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
                 raise SessionExpired(f"セッション切れ: {page.url}")
 
-            # 当月を選択
+            # 期間ボタンを開いて当月を選択
             page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
-            page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click()
-            # 日次表示
-            page.get_by_text(re.compile(UI_DAILY)).first.click()
+            page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click(timeout=10_000)
             page.wait_for_load_state("networkidle")
+            # 日別表示(画面に無い場合は何もしない)
+            daily = page.get_by_text(re.compile(UI_DAILY)).first
+            if daily.is_visible():
+                daily.click()
+                page.wait_for_load_state("networkidle")
 
-            with page.expect_download(timeout=60_000) as dl:
+            with page.expect_download(timeout=30_000) as dl:
                 page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
             dl.value.save_as(dest)
             # セッション更新(有効期限延長)を反映
