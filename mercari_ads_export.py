@@ -34,7 +34,8 @@ DATE_COLUMN = os.getenv("DATE_COLUMN", "集計日")  # CSV/シートの日付列
 ARCHIVE_WORD = "アーカイブ"
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
-UI_STATUS_FILTER = "配信中"          # ステータス絞り込み
+UI_STATUS_OPEN = r"ステータス|状態"   # 絞り込みメニューを開くボタン(無ければ無視)
+UI_STATUS_FILTER = r"^(有効|配信中)$"  # 「有効」=配信中キャンペーン
 UI_PERIOD_BUTTON = r"期間|日付"      # 期間ピッカーを開くボタン
 UI_PERIOD_THIS_MONTH = r"今月|当月"  # 期間プリセット
 UI_DAILY = r"日別"                   # 日別(日次)表示の切替
@@ -115,8 +116,11 @@ def download_csv(headless: bool) -> Path:
             if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
                 raise SessionExpired(f"セッション切れ: {page.url}")
 
-            # 配信中に絞り込み
-            page.get_by_text(UI_STATUS_FILTER, exact=True).first.click()
+            # 有効(=配信中)に絞り込み
+            opt = page.get_by_text(re.compile(UI_STATUS_FILTER)).first
+            if not opt.is_visible():  # 選択肢が隠れている場合はメニューを開く
+                page.get_by_text(re.compile(UI_STATUS_OPEN)).first.click()
+            opt.click()
             # 当月を選択
             page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
             page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click()
