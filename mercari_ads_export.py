@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -36,10 +37,13 @@ STATUS_COLUMN = os.getenv("STATUS_COLUMN", "")  # 有効/無効の列見出し�
 STATUS_ACTIVE = "有効"  # この値の行だけを配信中として残す
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
-UI_PERIOD_BUTTON = r"\d{4}/\d{2}/\d{2}\s*-\s*\d{4}/\d{2}/\d{2}"  # 期間ボタン(表示が「2026/09/26 - 2026/10/02」)
-UI_PERIOD_THIS_MONTH = r"今月|当月"  # 期間プリセット
-UI_DAILY = r"日別|日次"               # 日別(日次)表示の切替(画面に無ければ無視)
-UI_DOWNLOAD = r"^ダウンロード$"        # 一覧右上のDLボタン
+UI_PERIOD_BUTTON = r"\d{4}\/\d{2}\/\d{2}\s*-\s*\d{4}\/\d{2}\/\d{2}"  # 期間ボタン(表示が「2026/09/26 - 2026/10/02」)
+UI_DAILY_LABEL = "日別"                # DLダイアログの集計単位(期間合算/日別)
+UI_DOWNLOAD = r"^ダウンロード$"        # 一覧右上のDLボタン(ダイアログを開く)
+UI_CREATE = "ダウンロードファイル作成"  # ダイアログの作成ボタン
+UI_FILELIST = "ダウンロードファイル一覧"  # サイドバーのリンク(作成済みファイルの一覧)
+UI_FILE_DL = r"ダウンロード"            # 一覧ページ内の各ファイルのDLボタン(推測。要確認)
+FILE_WAIT_SEC = 180                    # ファイル生成待ちの上限
 
 log = logging.getLogger("mercari")
 
@@ -99,12 +103,60 @@ def inspect_page() -> None:
             print(f"\n=== 保存({n}): {path} ===")
             print(path.read_text(encoding="utf-8"))
             ans = input(
-                "\nブラウザで次の操作(期間ボタン→今月/当月を選ぶ→日別があれば→ダウンロード等)を1つ行い、"
+                "\nブラウザで次の操作を1つ行い、"
                 "Enterで再保存 / 終了は q + Enter > "
             )
             if ans.strip().lower() == "q":
                 break
         browser.close()
+
+
+def set_period_this_month(page, today: date) -> None:
+    """期間ピッカーで「当月1日 - 今日」をカレンダーのクリックで指定する。
+
+    ピッカーは2か月分(前月|当月)のカレンダーを出す。日付ボタンの列を1に戻る所で区切り、最後のブロックを当月とみなす。
+    """
+    page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
+    days = page.get_by_role("button", name=re.compile(r"^\d{1,2}$"))
+    days.first.wait_for()
+    nums = [int(t.strip()) for t in days.all_inner_texts()]
+    blocks: list[list[int]] = []
+    prev = 0
+    for i, n in enumerate(nums):
+        if n <= prev or not blocks:
+            blocks.append([])
+        blocks[-1].append(i)
+        prev = n
+    cur = blocks[-1]
+    if len(cur) < today.day:
+        raise RuntimeError(f"カレンダー構造が想定と違います: blocks={[len(b) for b in blocks]}")
+    days.nth(cur[0]).click()
+    days.nth(cur[today.day - 1]).click()
+    want = f"{today:%Y/%m/01} - {today:%Y/%m/%d}"
+    page.get_by_role("button", name=want).wait_for(timeout=10_000)  # 反映されたか確認
+
+
+def create_and_fetch_file(page, dest: Path) -> None:
+    """DLダイアログで日別を選んでファイル作成 -> ダウンロードファイル一覧から取得"""
+    page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
+    page.get_by_text(UI_DAILY_LABEL, exact=True).click()
+    page.get_by_role("button", name=UI_CREATE).click()
+    page.get_by_role("button", name=UI_CREATE).wait_for(state="hidden", timeout=30_000)
+
+    page.get_by_role("link", name=UI_FILELIST).first.click()
+    page.wait_for_load_state("networkidle")
+    log.info("一覧ページ: %s", dump_page(page, "filelist"))
+    deadline = time.time() + FILE_WAIT_SEC
+    while time.time() < deadline:
+        btn = page.get_by_role("button", name=re.compile(UI_FILE_DL))
+        if btn.count():
+            with page.expect_download(timeout=30_000) as dl:
+                btn.first.click()
+            dl.value.save_as(dest)
+            return
+        time.sleep(10)  # 生成待ち
+        page.reload(wait_until="networkidle")
+    raise TimeoutError(f"{FILE_WAIT_SEC}秒待ってもダウンロード対象が見つかりません")
 
 
 def download_csv(headless: bool) -> Path:
@@ -126,19 +178,9 @@ def download_csv(headless: bool) -> Path:
             if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
                 raise SessionExpired(f"セッション切れ: {page.url}")
 
-            # 期間ボタンを開いて当月を選択
-            page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
-            page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click(timeout=10_000)
+            set_period_this_month(page, today)
             page.wait_for_load_state("networkidle")
-            # 日別表示(画面に無い場合は何もしない)
-            daily = page.get_by_text(re.compile(UI_DAILY)).first
-            if daily.is_visible():
-                daily.click()
-                page.wait_for_load_state("networkidle")
-
-            with page.expect_download(timeout=30_000) as dl:
-                page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
-            dl.value.save_as(dest)
+            create_and_fetch_file(page, dest)
             # セッション更新(有効期限延長)を反映
             ctx.storage_state(path=str(STATE_FILE))
         except (PWTimeout, Exception) as e:
