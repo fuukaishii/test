@@ -32,10 +32,10 @@ TZ = ZoneInfo("Asia/Tokyo")
 
 DATE_COLUMN = os.getenv("DATE_COLUMN", "集計日")  # CSV/シートの日付列見出し。無ければ自動検出
 ARCHIVE_WORD = "アーカイブ"
+STATUS_COLUMN = os.getenv("STATUS_COLUMN", "")  # 有効/無効の列見出し。空なら自動検出
+STATUS_ACTIVE = "有効"  # この値の行だけを配信中として残す
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
-UI_STATUS_OPEN = r"ステータス|状態"   # 絞り込みメニューを開くボタン(無ければ無視)
-UI_STATUS_FILTER = r"^(有効|配信中)$"  # 「有効」=配信中キャンペーン
 UI_PERIOD_BUTTON = r"期間|日付"      # 期間ピッカーを開くボタン
 UI_PERIOD_THIS_MONTH = r"今月|当月"  # 期間プリセット
 UI_DAILY = r"日別"                   # 日別(日次)表示の切替
@@ -92,7 +92,7 @@ def inspect_page() -> None:
         page = ctx.new_page()
         page.goto(CAMPAIGNS_URL, wait_until="networkidle")
         log.info("初期画面: %s", dump_page(page, "inspect_initial"))
-        input("ブラウザで 配信中絞り込み→当月→日別→DLボタンが見える状態まで操作し、Enter > ")
+        input("ブラウザで 当月→日別→DLボタンが見える状態まで操作し、Enter > ")
         log.info("操作後: %s", dump_page(page, "inspect_after"))
         browser.close()
 
@@ -116,11 +116,6 @@ def download_csv(headless: bool) -> Path:
             if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
                 raise SessionExpired(f"セッション切れ: {page.url}")
 
-            # 有効(=配信中)に絞り込み
-            opt = page.get_by_text(re.compile(UI_STATUS_FILTER)).first
-            if not opt.is_visible():  # 選択肢が隠れている場合はメニューを開く
-                page.get_by_text(re.compile(UI_STATUS_OPEN)).first.click()
-            opt.click()
             # 当月を選択
             page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
             page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click()
@@ -165,6 +160,27 @@ def drop_archive_rows(header: list[str], rows: list[list[str]]) -> list[list[str
     """
     kept = [r for r in rows if not any(c.strip() == ARCHIVE_WORD for c in r)]
     log.info("アーカイブ行削除: %d -> %d 行", len(rows), len(kept))
+    return kept
+
+
+def keep_active_rows(header: list[str], rows: list[list[str]]) -> list[list[str]]:
+    """有効/無効の列で判定し、値が「有効」の行だけ残す(=配信中キャンペーン)。"""
+    if STATUS_COLUMN:
+        if STATUS_COLUMN not in header:
+            raise ValueError(f"STATUS_COLUMN={STATUS_COLUMN!r} がCSVの見出しにありません: {header}")
+        col = header.index(STATUS_COLUMN)
+    else:
+        cands = [
+            i for i in range(len(header))
+            if any(i < len(r) and r[i].strip() in (STATUS_ACTIVE, "無効") for r in rows)
+        ]
+        if not cands:
+            raise ValueError(f"有効/無効の列を検出できません。STATUS_COLUMN を指定してください: {header}")
+        hinted = [i for i in cands if re.search("ステータス|状態|有効|配信", header[i])]
+        col = (hinted or cands)[0]
+    log.info("有効/無効の判定列: %r", header[col])
+    kept = [r for r in rows if col < len(r) and r[col].strip() == STATUS_ACTIVE]
+    log.info("有効行のみ残す: %d -> %d 行", len(rows), len(kept))
     return kept
 
 
@@ -308,7 +324,8 @@ def main() -> int:
     if len(rows) < 2:
         log.error("CSVにデータ行がありません")
         return 1
-    header, body = rows[0], drop_archive_rows(rows[0], rows[1:])
+    header = rows[0]
+    body = keep_active_rows(header, drop_archive_rows(header, rows[1:]))
     today = datetime.now(TZ).date()
     if args.dry_run:
         h, m = merge_current_month(header, [], header, body, today)
