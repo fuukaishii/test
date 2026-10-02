@@ -499,14 +499,53 @@ def notify(title: str, msg: str) -> None:
             urllib.request.urlopen(req, timeout=15).read()
         except Exception as e:  # noqa: BLE001
             log.error("Webhook通知に失敗: %s", e)
+    try:
+        (BASE / "logs").mkdir(exist_ok=True)
+        with open(BASE / "logs" / "ALERT.txt", "a", encoding="utf-8") as f:  # 通知の履歴(消えない記録)
+            f.write(f"{datetime.now(TZ):%Y-%m-%d %H:%M:%S} {title} / {msg}\n")
+    except OSError:
+        pass
     if sys.platform == "win32":
-        import subprocess
+        windows_toast(f"メルカリ広告→スプシ: {title}", msg)
 
-        code = "import ctypes,sys;ctypes.windll.user32.MessageBoxW(0,sys.argv[2],sys.argv[1],0x40|0x40000)"
-        subprocess.Popen(  # 閉じられるまで残るポップアップ。本処理は待たない
-            [sys.executable, "-c", code, f"メルカリ広告→スプシ: {title}", msg],
-            creationflags=0x00000008,  # DETACHED_PROCESS
+
+_TOAST_PS = r"""
+$ErrorActionPreference = 'Stop'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$t = $xml.GetElementsByTagName('text')
+$t.Item(0).AppendChild($xml.CreateTextNode($env:N_TITLE)) | Out-Null
+$t.Item(1).AppendChild($xml.CreateTextNode($env:N_MSG)) | Out-Null
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show($toast)
+Start-Sleep -Milliseconds 1500
+"""
+
+
+def windows_toast(title: str, msg: str) -> None:
+    """Windowsのトースト通知(通知センターに残る)。
+
+    タスクスケジューラは終了時に子プロセスを強制終了するため、常駐するポップアップは使えない。
+    トーストは表示後にプロセスが終わっても通知センターに残る。
+    """
+    import base64
+    import subprocess
+
+    enc = base64.b64encode(_TOAST_PS.encode("utf-16-le")).decode()
+    env = dict(os.environ, N_TITLE=title, N_MSG=msg)
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+            env=env, capture_output=True, timeout=30,
         )
+        if r.returncode != 0:
+            log.error("トースト通知に失敗(code=%s): %s", r.returncode, r.stderr.decode("utf-8", "replace")[:300])
+        else:
+            log.info("トースト通知を送信しました")
+    except Exception as e:  # noqa: BLE001
+        log.error("トースト通知に失敗: %s", e)
 
 
 # ============================ main ============================
@@ -515,6 +554,7 @@ def main() -> int:
     ap.add_argument("--login", action="store_true", help="手動ログインしてセッション保存")
     ap.add_argument("--inspect", action="store_true", help="画面要素を保存(セレクタ調整用)")
     ap.add_argument("--google-login", action="store_true", help="Googleアカウントで認証(初回のみ)")
+    ap.add_argument("--test-notify", action="store_true", help="通知のテスト送信")
     ap.add_argument("--headed", action="store_true", help="ブラウザを表示して実行")
     ap.add_argument("--csv", type=Path, help="DLせずこのCSVを使う")
     ap.add_argument("--dry-run", action="store_true", help="シートへ書き込まない")
@@ -524,6 +564,9 @@ def main() -> int:
 
     if args.login:
         save_login_session()
+        return 0
+    if args.test_notify:
+        notify("通知テスト", "この通知が見えれば、失敗時の通知は動作します")
         return 0
     if args.google_login:
         google_login()

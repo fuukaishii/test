@@ -39,7 +39,7 @@ schtasks /create /tn "MercariAdsExport" /tr "\"%CD%\run_daily.bat\"" /sc daily /
 - PCの電源が入りログオン中であること。取り逃し対策はタスクスケジューラGUIの「設定」で「スケジュールされた時刻にタスクを開始できなかった場合、すぐにタスクを実行する」をON
 
 ## 失敗通知(定期実行時のみ)
-`run_daily.bat` 経由で失敗(終了コード≠0)したとき、Windowsのポップアップ(閉じるまで残る)で通知する。
+`run_daily.bat` 経由で失敗(終了コード≠0)したとき、Windowsのトースト通知(通知センターに残る)で通知し、`logs\ALERT.txt` に履歴を追記する。テスト: `python mercari_ads_export.py --test-notify`
 Slack/Teams等のIncoming Webhook URLを `notify_webhook.txt`(1行・gitignore済み)に書くと、そちらにも通知する。
 - 2=メルカリ再ログイン要、3=Google未認証、4=Google認証失効、1=その他の失敗
 
