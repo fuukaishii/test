@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""メルカリ広告管理画面: 配信中キャンペーンの当月日次CSV -> Googleスプシ(当月分のみ上書き)
+
+使い方:
+  python mercari_ads_export.py --login   # 初回のみ。ブラウザが開くので手動ログイン(2FA可)。セッションを保存
+  python mercari_ads_export.py           # 通常実行(headless)。cron用
+  python mercari_ads_export.py --headed  # 画面を見ながら実行(セレクタ調整用)
+  python mercari_ads_export.py --csv x.csv  # DLを飛ばして既存CSVでシート更新のみ試す
+"""
+import argparse
+import csv
+import io
+import logging
+import os
+import re
+import sys
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+BASE = Path(__file__).resolve().parent
+CAMPAIGNS_URL = (
+    "https://ads-manager.partner.mercari.com/biz-accounts/yCaeSbVBUdToVHT2jXTDE4"
+    "/ad-accounts/KDdQNN7QndqffnZywfMPec/campaigns"
+)
+SPREADSHEET_ID = "1Y-H26QoUVAvRWYNfB8UUcfWSCmVIuu8sKbzn2Sasz90"
+SHEET_TAB = os.getenv("SHEET_TAB", "貼り付け用")  # タブ名(変更不可とのことなので固定)
+SERVICE_ACCOUNT_FILE = Path(os.getenv("SERVICE_ACCOUNT_FILE", BASE / "service_account.json"))
+STATE_FILE = BASE / "auth" / "state.json"  # ログインセッション(storage_state)
+DOWNLOAD_DIR = BASE / "downloads"
+TZ = ZoneInfo("Asia/Tokyo")
+
+DATE_COLUMN = os.getenv("DATE_COLUMN", "日付")  # CSV/シートの日付列見出し。無ければ自動検出
+ARCHIVE_WORD = "アーカイブ"
+
+# ---- 画面操作の文言 (実画面に合わせて調整してください) ----
+UI_STATUS_FILTER = "配信中"          # ステータス絞り込み
+UI_PERIOD_BUTTON = r"期間|日付"      # 期間ピッカーを開くボタン
+UI_PERIOD_THIS_MONTH = r"今月|当月"  # 期間プリセット
+UI_DAILY = r"日別"                   # 日別(日次)表示の切替
+UI_DOWNLOAD = r"CSV|ダウンロード"    # DLボタン
+
+log = logging.getLogger("mercari")
+
+
+class SessionExpired(Exception):
+    pass
+
+
+# ============================ 1. ログイン/ダウンロード ============================
+def save_login_session() -> None:
+    from playwright.sync_api import sync_playwright
+
+    STATE_FILE.parent.mkdir(exist_ok=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        page.goto(CAMPAIGNS_URL)
+        input("ブラウザでログインし、キャンペーン一覧が表示されたらここで Enter を押してください > ")
+        ctx.storage_state(path=str(STATE_FILE))
+        STATE_FILE.chmod(0o600)
+        browser.close()
+    log.info("セッション保存: %s", STATE_FILE)
+
+
+def download_csv(headless: bool) -> Path:
+    from playwright.sync_api import TimeoutError as PWTimeout
+    from playwright.sync_api import sync_playwright
+
+    if not STATE_FILE.exists():
+        raise SessionExpired("auth/state.json がありません。--login を先に実行してください")
+    DOWNLOAD_DIR.mkdir(exist_ok=True)
+    today = datetime.now(TZ).date()
+    dest = DOWNLOAD_DIR / f"campaigns_daily_{today:%Y%m}.csv"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        ctx = browser.new_context(storage_state=str(STATE_FILE), accept_downloads=True, locale="ja-JP")
+        page = ctx.new_page()
+        try:
+            page.goto(CAMPAIGNS_URL, wait_until="networkidle")
+            if "/campaigns" not in page.url:  # ログイン画面等へ飛ばされた
+                raise SessionExpired(f"セッション切れ: {page.url}")
+
+            # 配信中に絞り込み
+            page.get_by_text(UI_STATUS_FILTER, exact=True).first.click()
+            # 当月を選択
+            page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
+            page.get_by_text(re.compile(UI_PERIOD_THIS_MONTH)).first.click()
+            # 日次表示
+            page.get_by_text(re.compile(UI_DAILY)).first.click()
+            page.wait_for_load_state("networkidle")
+
+            with page.expect_download(timeout=60_000) as dl:
+                page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
+            dl.value.save_as(dest)
+            # セッション更新(有効期限延長)を反映
+            ctx.storage_state(path=str(STATE_FILE))
+        except (PWTimeout, Exception) as e:
+            if isinstance(e, SessionExpired):
+                raise
+            shot = BASE / "logs" / f"error_{datetime.now(TZ):%Y%m%d_%H%M%S}.png"
+            shot.parent.mkdir(exist_ok=True)
+            page.screenshot(path=str(shot), full_page=True)
+            raise RuntimeError(f"画面操作に失敗。スクショ: {shot} / セレクタ文言(UI_*)を調整してください: {e}") from e
+        finally:
+            browser.close()
+    log.info("CSV保存: %s", dest)
+    return dest
+
+
+# ============================ 2. CSV読込・アーカイブ行削除 ============================
+def read_csv(path: Path) -> list[list[str]]:
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError("CSVの文字コードを判定できません")
+    return [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
+
+
+def drop_archive_rows(header: list[str], rows: list[list[str]]) -> list[list[str]]:
+    """いずれかのセル値が「アーカイブ」(前後空白除く完全一致)の行を削除。
+
+    部分一致にするとキャンペーン名に「アーカイブ」を含む行まで消えるため完全一致にしている。
+    """
+    kept = [r for r in rows if not any(c.strip() == ARCHIVE_WORD for c in r)]
+    log.info("アーカイブ行削除: %d -> %d 行", len(rows), len(kept))
+    return kept
+
+
+# ============================ 3. 日付の統一 ============================
+_DATE_RES = [
+    re.compile(r"^(\d{4})[/\-.年](\d{1,2})[/\-.月](\d{1,2})日?$"),
+    re.compile(r"^(\d{4})(\d{2})(\d{2})$"),
+]
+
+
+def parse_date(v: str, default_year: int | None = None) -> date | None:
+    """2026/10/1, 2026-10-01, 2026年10月1日, 20261001 (+ 時刻付き) を date に。年なし(10/1)は default_year 補完。"""
+    s = (v or "").strip().replace("　", " ").split(" ")[0].split("T")[0]
+    for rx in _DATE_RES:
+        m = rx.match(s)
+        if m:
+            try:
+                return date(*map(int, m.groups()))
+            except ValueError:
+                return None
+    m = re.match(r"^(\d{1,2})[/月](\d{1,2})日?$", s)
+    if m and default_year:
+        try:
+            return date(default_year, int(m[1]), int(m[2]))
+        except ValueError:
+            return None
+    return None
+
+
+def fmt_date(d: date) -> str:
+    return f"{d:%Y/%m/%d}"  # シート上の統一形式
+
+
+def find_date_col(header: list[str], rows: list[list[str]], year: int) -> int:
+    if DATE_COLUMN in header:
+        return header.index(DATE_COLUMN)
+    best, best_n = -1, 0
+    for i in range(len(header)):
+        n = sum(1 for r in rows[:50] if i < len(r) and parse_date(r[i], year))
+        if n > best_n:
+            best, best_n = i, n
+    if best < 0:
+        raise ValueError(f"日付列を特定できません。DATE_COLUMN を指定してください: {header}")
+    return best
+
+
+# ============================ 4. 当月分のみ上書きマージ ============================
+def merge_current_month(
+    sheet_header: list[str],
+    sheet_rows: list[list[str]],
+    new_header: list[str],
+    new_rows: list[list[str]],
+    today: date,
+) -> tuple[list[str], list[list[str]]]:
+    """既存(シート)の当月行を捨て、新データの当月行で置換。過去月は保持し日付昇順で返す。"""
+    ym = (today.year, today.month)
+    header = sheet_header or new_header
+    # 新データをシートの列順へ見出し名で整列
+    idx = {h: i for i, h in enumerate(new_header)}
+    missing = [h for h in header if h not in idx]
+    if missing:
+        log.warning("CSVに無い列は空欄で出力: %s", missing)
+    extra = [h for h in new_header if h not in header]
+    if extra:
+        log.warning("シートに無いCSV列は無視: %s", extra)
+
+    def align(r: list[str]) -> list[str]:
+        return [r[idx[h]] if h in idx and idx[h] < len(r) else "" for h in header]
+
+    dcol = find_date_col(header, sheet_rows or [align(r) for r in new_rows], today.year)
+
+    def normalize(rows: list[list[str]], what: str) -> list[tuple[date | None, list[str]]]:
+        out = []
+        for r in rows:
+            r = (r + [""] * len(header))[: len(header)]
+            d = parse_date(r[dcol], today.year)
+            if d:
+                r[dcol] = fmt_date(d)
+            else:
+                log.warning("%s: 日付を解釈できない行 %r", what, r[dcol])
+            out.append((d, r))
+        return out
+
+    old = normalize(sheet_rows, "既存")
+    new = normalize([align(r) for r in new_rows], "新規")
+    new_cur = [(d, r) for d, r in new if d and (d.year, d.month) == ym]
+    if not new_cur:
+        raise ValueError("当月の日付を持つ新規データが0件のため中断(既存当月分を消さないため)")
+    old_keep = [(d, r) for d, r in old if not (d and (d.year, d.month) == ym)]
+    dated = sorted(
+        [(d, r) for d, r in old_keep + new_cur if d], key=lambda x: x[0]
+    )  # sortは安定: 同日は 既存→新規 の順を維持
+    undated = [r for d, r in old_keep if not d]  # 日付不明の既存行は末尾に残す(消さない)
+    return header, [r for _, r in dated] + undated
+
+
+# ============================ 5. Google Sheets ============================
+def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date) -> None:
+    import gspread
+
+    gc = gspread.service_account(filename=str(SERVICE_ACCOUNT_FILE))
+    ws = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_TAB)
+    values = ws.get_all_values()  # 表示値(文字列)で取得 -> parse_dateで統一
+    sheet_header = values[0] if values else []
+    sheet_rows = [r for r in values[1:] if any(c.strip() for c in r)]
+    header, merged = merge_current_month(sheet_header, sheet_rows, new_header, new_rows, today)
+
+    out = [header] + merged
+    # 先にクリアせず、update後に余った末尾行だけ消す(途中失敗でデータを失いにくくする)
+    ws.update(range_name="A1", values=out, value_input_option="USER_ENTERED")
+    if len(values) > len(out):
+        ws.batch_clear([f"A{len(out) + 1}:ZZ{len(values)}"])
+    log.info("シート更新: %d 行(ヘッダ除く)", len(merged))
+
+
+# ============================ main ============================
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--login", action="store_true", help="手動ログインしてセッション保存")
+    ap.add_argument("--headed", action="store_true", help="ブラウザを表示して実行")
+    ap.add_argument("--csv", type=Path, help="DLせずこのCSVを使う")
+    ap.add_argument("--dry-run", action="store_true", help="シートへ書き込まない")
+    args = ap.parse_args()
+    (BASE / "logs").mkdir(exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.login:
+        save_login_session()
+        return 0
+    try:
+        path = args.csv or download_csv(headless=not args.headed)
+    except SessionExpired as e:
+        log.error("%s -> `python mercari_ads_export.py --login` で再ログインしてください", e)
+        return 2
+
+    rows = read_csv(path)
+    if len(rows) < 2:
+        log.error("CSVにデータ行がありません")
+        return 1
+    header, body = rows[0], drop_archive_rows(rows[0], rows[1:])
+    today = datetime.now(TZ).date()
+    if args.dry_run:
+        h, m = merge_current_month(header, [], header, body, today)
+        log.info("dry-run: %d 行 / 先頭: %s", len(m), m[:2])
+        return 0
+    write_to_sheet(header, body, today)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

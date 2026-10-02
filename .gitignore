@@ -1,0 +1,7 @@
+auth/
+downloads/
+logs/
+service_account.json
+.env
+__pycache__/
+.venv/
