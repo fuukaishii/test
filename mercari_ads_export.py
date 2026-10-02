@@ -30,7 +30,7 @@ STATE_FILE = BASE / "auth" / "state.json"  # ログインセッション(storage
 DOWNLOAD_DIR = BASE / "downloads"
 TZ = ZoneInfo("Asia/Tokyo")
 
-DATE_COLUMN = os.getenv("DATE_COLUMN", "日付")  # CSV/シートの日付列見出し。無ければ自動検出
+DATE_COLUMN = os.getenv("DATE_COLUMN", "集計日")  # CSV/シートの日付列見出し。無ければ自動検出
 ARCHIVE_WORD = "アーカイブ"
 
 # ---- 画面操作の文言 (実画面に合わせて調整してください) ----
