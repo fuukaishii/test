@@ -117,7 +117,7 @@ def set_period_this_month(page, today: date) -> None:
     ピッカーは2か月分(前月|当月)のカレンダーを出す。日付ボタンの列を1に戻る所で区切り、最後のブロックを当月とみなす。
     """
     page.get_by_role("button", name=re.compile(UI_PERIOD_BUTTON)).first.click()
-    days = page.get_by_role("button", name=re.compile(r"^\d{1,2}$"))
+    days = page.locator("button").filter(has_text=re.compile(r"^\d{1,2}$"))  # 名前(aria-label)ではなく表示テキストで判定
     days.first.wait_for()
     nums = [int(t.strip()) for t in days.all_inner_texts()]
     blocks: list[list[int]] = []
