@@ -25,7 +25,7 @@ CAMPAIGNS_URL = (
     "/ad-accounts/KDdQNN7QndqffnZywfMPec/campaigns"
 )
 SPREADSHEET_ID = "1Y-H26QoUVAvRWYNfB8UUcfWSCmVIuu8sKbzn2Sasz90"
-SHEET_TAB = os.getenv("SHEET_TAB", "貼り付け用")  # タブ名(変更不可とのことなので固定)
+SHEET_TAB = os.getenv("SHEET_TAB", "貼り付け用（タブ名変更不可）")  # タブ名(変更不可とのことなので固定)
 # Google認証: OAuth(自分のGoogleアカウント)を標準とし、service_account.json があればそちらを優先
 OAUTH_CLIENT_FILE = Path(os.getenv("OAUTH_CLIENT_FILE", BASE / "oauth_client.json"))  # OAuthクライアントID(デスクトップ)のJSON
 OAUTH_TOKEN_FILE = BASE / "auth" / "google_token.json"  # 初回ログインで自動作成(refresh token入り)
