@@ -8,3 +8,4 @@ __pycache__/
 oauth_client.json
 client_secret*.json
 notify_webhook.txt
+notify_mail.json

@@ -43,6 +43,11 @@ schtasks /create /tn "MercariAdsExport" /tr "\"%CD%\run_daily.bat\"" /sc daily /
 Slack/Teams等のIncoming Webhook URLを `notify_webhook.txt`(1行・gitignore済み)に書くと、そちらにも通知する。
 - 2=メルカリ再ログイン要、3=Google未認証、4=Google認証失効、1=その他の失敗
 
+### メール通知(任意)
+`notify_mail.example.json` を `notify_mail.json` にコピーして SMTP 設定を書くと、失敗時にメールも送る(gitignore済み)。
+Google認証が切れた時にも送れるよう、Google APIではなくSMTPを使っている。Gmail/Workspaceはアプリパスワード(2段階認証が必要、管理者が許可している場合のみ)か、管理者設定のSMTPリレーを使う。
+テスト: `python mercari_ads_export.py --test-notify`
+
 ## 仕様メモ
 - アーカイブ行: いずれかのセルが「アーカイブ」と完全一致する行を削除
 - 取得単位: シートが広告グループ単位のため、キャンペーン一覧CSVで配信中(有効)キャンペーンを特定 → 各キャンペーンの広告グループ画面から日別CSVを取得して結合(広告グループ自体の有効/無効は問わず、アーカイブ行のみ削除)。1件でも失敗したら書き込まず中断

@@ -11,6 +11,9 @@ import argparse
 import csv
 import io
 import json
+import smtplib
+import socket
+from email.message import EmailMessage
 import logging
 import os
 import re
@@ -475,6 +478,7 @@ def write_to_sheet(new_header: list[str], new_rows: list[list[str]], today: date
 
 
 # ============================ 失敗通知 ============================
+NOTIFY_MAIL_FILE = BASE / "notify_mail.json"  # SMTP設定(メール通知)。gitignore済み。notify_mail.example.json 参照
 NOTIFY_WEBHOOK_FILE = BASE / "notify_webhook.txt"  # Slack/Teams等のIncoming Webhook URL(1行)。gitignore済み
 FAILURE_MESSAGES = {
     1: ("実行に失敗しました", "logs\\task.log を確認してください"),
@@ -482,6 +486,35 @@ FAILURE_MESSAGES = {
     3: ("Google認証が未実施です", "python mercari_ads_export.py --google-login を実行してください"),
     4: ("Google認証が失効しました", "python mercari_ads_export.py --google-login で再認証してください"),
 }
+
+
+def send_mail(title: str, msg: str) -> None:
+    """notify_mail.json があればSMTPでメール送信。Googleの認証が切れた時にも送れるよう、Google APIではなくSMTPを使う"""
+    if not NOTIFY_MAIL_FILE.exists():
+        return
+    try:
+        cfg = json.loads(NOTIFY_MAIL_FILE.read_text(encoding="utf-8"))
+        to = cfg["to"] if isinstance(cfg["to"], list) else [cfg["to"]]
+        mail = EmailMessage()
+        mail["Subject"] = f"【メルカリ広告→スプシ】{title}"
+        mail["From"] = cfg.get("from") or cfg["user"]
+        mail["To"] = ", ".join(to)
+        mail.set_content(
+            f"{title}\n\n{msg}\n\n発生: {datetime.now(TZ):%Y-%m-%d %H:%M:%S} / PC: {socket.gethostname()}\n"
+            f"詳細: {BASE / 'logs' / 'task.log'}\n"
+        )
+        security = cfg.get("security", "starttls")
+        port = int(cfg.get("port", 465 if security == "ssl" else 587))
+        smtp = (smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP)(cfg["host"], port, timeout=30)
+        with smtp:
+            if security == "starttls":
+                smtp.starttls()
+            if cfg.get("password"):
+                smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(mail)
+        log.info("メール通知を送信しました: %s", to)
+    except Exception as e:  # noqa: BLE001
+        log.error("メール通知に失敗: %s", e)
 
 
 def notify(title: str, msg: str) -> None:
@@ -499,6 +532,7 @@ def notify(title: str, msg: str) -> None:
             urllib.request.urlopen(req, timeout=15).read()
         except Exception as e:  # noqa: BLE001
             log.error("Webhook通知に失敗: %s", e)
+    send_mail(title, msg)
     try:
         (BASE / "logs").mkdir(exist_ok=True)
         with open(BASE / "logs" / "ALERT.txt", "a", encoding="utf-8") as f:  # 通知の履歴(消えない記録)
