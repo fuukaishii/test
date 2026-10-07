@@ -20,7 +20,7 @@ import re
 import sys
 import time
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urljoin
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -203,6 +203,24 @@ def file_matches_campaign(path: Path, campaign_id: str) -> bool:
     return all(campaign_id in [c.strip() for c in r] for r in rows[1:])
 
 
+def file_is_fresh(path: Path, today: date) -> bool:
+    """取得したCSVが今回作成した新しいファイルか(一覧に残る過去のファイルを掴んでいないか)を日付で判定。
+
+    当月1日以外は、最新の日付が昨日以降であることを要求する。古ければ生成完了を待って再取得させる。
+    """
+    rows = read_csv(path)
+    if len(rows) < 2 or today.day == 1:
+        return True
+    dcol = find_date_col(rows[0], rows[1:], today.year)
+    dates = [d for d in (parse_date(r[dcol], today.year) for r in rows[1:] if dcol < len(r)) if d]
+    if not dates:
+        return True
+    ok = max(dates) >= today - timedelta(days=1)
+    if not ok:
+        log.info("取得ファイルが古い可能性: 最新日=%s (期待: %s 以降)", fmt_date(max(dates)), fmt_date(today - timedelta(days=1)))
+    return ok
+
+
 def download_all(headless: bool) -> list[Path]:
     """キャンペーン一覧CSVで配信中キャンペーンを特定し、各キャンペーンの広告グループ単位(日別)CSVを取得して返す"""
     from playwright.sync_api import TimeoutError as PWTimeout
@@ -230,7 +248,7 @@ def download_all(headless: bool) -> list[Path]:
             # 1) キャンペーン一覧(日別)で配信中(有効)キャンペーンを特定
             set_period_this_month(page, today)
             page.wait_for_load_state("networkidle")
-            create_and_fetch_file(page, list_page, camp_dest)
+            create_and_fetch_file(page, list_page, camp_dest, check=lambda d: file_is_fresh(d, today))
             ids = active_campaign_ids(camp_dest)
 
             # 2) 各キャンペーンの広告グループ単位(日別)を取得。1件でも失敗したら全体を中断(部分データで当月を上書きしない)
@@ -239,7 +257,7 @@ def download_all(headless: bool) -> list[Path]:
                 page.goto(f"{CAMPAIGNS_URL}/{cid}/ad-groups", wait_until="networkidle")
                 set_period_this_month(page, today)
                 page.wait_for_load_state("networkidle")
-                create_and_fetch_file(page, list_page, dest, check=lambda d, c=cid: file_matches_campaign(d, c))
+                create_and_fetch_file(page, list_page, dest, check=lambda d, c=cid: file_matches_campaign(d, c) and file_is_fresh(d, today))
                 log.info("広告グループCSV保存: %s", dest)
                 paths.append(dest)
             ctx.storage_state(path=str(STATE_FILE))  # セッション更新(有効期限延長)を反映
