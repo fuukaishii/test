@@ -399,6 +399,11 @@ def merge_current_month(
     old = normalize(sheet_rows, "既存")
     new = normalize([align(r) for r in new_rows], "新規")
     new_cur = [(d, r) for d, r in new if d and (d.year, d.month) == ym]
+    if new_cur:
+        ds = sorted({d for d, _ in new_cur})
+        log.info("取得データの日付範囲: %s 〜 %s (%d日分) / 今日(%s)の行: %s",
+                 fmt_date(ds[0]), fmt_date(ds[-1]), len(ds), fmt_date(today),
+                 "あり" if today in ds else "なし(集計前の可能性)")
     if not new_cur:
         raise ValueError("当月の日付を持つ新規データが0件のため中断(既存当月分を消さないため)")
     old_keep = [(d, r) for d, r in old if not (d and (d.year, d.month) == ym)]
