@@ -147,6 +147,26 @@ def set_period_this_month(page, today: date) -> None:
     page.get_by_role("button", name=want).wait_for(timeout=10_000)  # 反映されたか確認
 
 
+_FNAME_RE = re.compile(r"(\d{8})-(\d{8})_(\d{14})\d*\.csv$")  # 例: report_daily_ad_group_20261001-20261009_20261009093114435.csv
+
+
+def file_is_new(filename: str, created_after: datetime, today: date) -> bool:
+    """ダウンロードファイル名の「期間終了日」と「作成日時」から、今回作った新しいファイルかを判定する。
+
+    名前から読めない場合は判定できないので True(中身の検証check側に任せる)。
+    """
+    m = _FNAME_RE.search(filename)
+    if not m:
+        log.warning("ファイル名から作成日時を判定できません: %s", filename)
+        return True
+    end = datetime.strptime(m.group(2), "%Y%m%d").date()
+    created = datetime.strptime(m.group(3), "%Y%m%d%H%M%S").replace(tzinfo=TZ)
+    ok = end == today and created >= created_after - timedelta(minutes=2)
+    if not ok:
+        log.info("古いファイルを検出: %s (期間終了=%s, 作成=%s)", filename, end, created)
+    return ok
+
+
 def create_and_fetch_file(page, list_page, dest: Path, check=None) -> None:
     """DLダイアログで日別を選んでファイル作成 -> ダウンロードファイル一覧(別タブ)から取得。
 
@@ -155,6 +175,7 @@ def create_and_fetch_file(page, list_page, dest: Path, check=None) -> None:
     """
     list_page.reload(wait_until="networkidle")
     before = list_page.inner_text("body")
+    started = datetime.now(TZ)  # これより前に作られたファイルは古いファイル
     page.get_by_role("button", name=re.compile(UI_DOWNLOAD)).first.click()
     page.get_by_text(UI_DAILY_LABEL, exact=True).click()
     page.get_by_role("button", name=UI_CREATE).click()
@@ -171,9 +192,10 @@ def create_and_fetch_file(page, list_page, dest: Path, check=None) -> None:
             with list_page.expect_download(timeout=30_000) as dl:
                 btn.first.click()
             dl.value.save_as(dest)
-            if check is None or check(dest):
+            log.info("ダウンロード: %s", dl.value.suggested_filename)
+            if file_is_new(dl.value.suggested_filename, started, started.date()) and (check is None or check(dest)):
                 return
-            log.info("取得ファイルの中身が期待と違うため、生成完了を待って再取得します")
+            log.info("取得ファイルが今回作成した新しいファイルではないため、生成完了を待って再取得します")
     raise TimeoutError(f"{FILE_WAIT_SEC}秒待っても期待するダウンロードファイルが見つかりません")
 
 
